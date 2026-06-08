@@ -136,8 +136,30 @@ impl From<Lockfile> for Credentials {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyCheck {
+    pub state: ReadyCheckState,
     pub player_response: PlayerResponse,
     pub timer: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadyCheckState {
+    InProgress,
+    EveryoneReady,
+    Invalid,
+    Error,
+    Other,
+}
+
+impl ReadyCheckState {
+    fn from_lcu(value: &str) -> Self {
+        match value {
+            "InProgress" => Self::InProgress,
+            "EveryoneReady" => Self::EveryoneReady,
+            "Invalid" => Self::Invalid,
+            "Error" => Self::Error,
+            _ => Self::Other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +408,10 @@ fn parse_ready_check_event_message(
 }
 
 fn parse_ready_check_data(data: &Value) -> Option<ReadyCheck> {
+    let state = data
+        .get("state")
+        .and_then(Value::as_str)
+        .map(ReadyCheckState::from_lcu)?;
     let player_response = data
         .get("playerResponse")
         .and_then(Value::as_str)
@@ -393,6 +419,7 @@ fn parse_ready_check_data(data: &Value) -> Option<ReadyCheck> {
     let timer = data.get("timer").and_then(parse_timer).unwrap_or_default();
 
     Some(ReadyCheck {
+        state,
         player_response,
         timer,
     })
@@ -497,18 +524,19 @@ mod tests {
 
     #[test]
     fn parses_ready_check_wamp_event() {
-        let message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"playerResponse":"None","timer":3},"eventType":"Update","uri":"/lol-matchmaking/v1/ready-check"}]"#;
+        let message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"state":"InProgress","playerResponse":"None","timer":3},"eventType":"Update","uri":"/lol-matchmaking/v1/ready-check"}]"#;
 
         let event = parse_ready_check_event(message).unwrap().unwrap();
 
+        assert_eq!(event.state, ReadyCheckState::InProgress);
         assert_eq!(event.player_response, PlayerResponse::None);
         assert_eq!(event.timer, 3);
     }
 
     #[test]
     fn parses_ready_check_timer_as_float_or_string() {
-        let float_message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"playerResponse":"None","timer":3.9}}]"#;
-        let string_message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"playerResponse":"None","timer":"4.2"}}]"#;
+        let float_message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"state":"InProgress","playerResponse":"None","timer":3.9}}]"#;
+        let string_message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"state":"InProgress","playerResponse":"None","timer":"4.2"}}]"#;
 
         assert_eq!(
             parse_ready_check_event(float_message)
@@ -524,6 +552,15 @@ mod tests {
                 .timer,
             4
         );
+    }
+
+    #[test]
+    fn parses_ready_check_state() {
+        let message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"state":"Invalid","playerResponse":"None","timer":0}}]"#;
+
+        let event = parse_ready_check_event(message).unwrap().unwrap();
+
+        assert_eq!(event.state, ReadyCheckState::Invalid);
     }
 
     #[test]

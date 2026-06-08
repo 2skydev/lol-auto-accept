@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     config::AppConfig,
-    lcu::{self, Credentials, LcuClient, PlayerResponse, ReadyCheck},
+    lcu::{self, Credentials, LcuClient, PlayerResponse, ReadyCheck, ReadyCheckState},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,9 @@ pub enum AcceptDecision {
     CancelPending,
     Schedule(Duration),
 }
+
+const ACCEPT_REQUEST_ATTEMPTS: usize = 3;
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Error)]
 pub enum AutoAcceptError {
@@ -286,6 +289,10 @@ pub fn accept_decision(
     config: &AppConfig,
     has_pending_accept: bool,
 ) -> AcceptDecision {
+    if ready_check.state != ReadyCheckState::InProgress {
+        return AcceptDecision::CancelPending;
+    }
+
     if ready_check.player_response != PlayerResponse::None {
         return AcceptDecision::CancelPending;
     }
@@ -302,17 +309,11 @@ async fn schedule_accept(delay: Duration, client: LcuClient, status_callback: St
     time::sleep(delay).await;
 
     match client.ready_check().await {
-        Ok(Some(ready_check)) if ready_check.player_response == PlayerResponse::None => {
-            match client.accept_ready_check().await {
-                Ok(()) => {
-                    info!("accepted ready check");
-                    (status_callback)(BackendStatus::Accepted);
-                }
-                Err(error) => {
-                    error!("failed to accept ready check: {error}");
-                    (status_callback)(BackendStatus::AcceptFailed);
-                }
-            }
+        Ok(Some(ready_check))
+            if ready_check.state == ReadyCheckState::InProgress
+                && ready_check.player_response == PlayerResponse::None =>
+        {
+            accept_ready_check(client, status_callback).await;
         }
         Ok(_) => {
             (status_callback)(BackendStatus::Connected);
@@ -321,6 +322,55 @@ async fn schedule_accept(delay: Duration, client: LcuClient, status_callback: St
             error!("failed to verify ready check before accepting: {error}");
             (status_callback)(BackendStatus::AcceptCheckFailed);
         }
+    }
+}
+
+async fn accept_ready_check(client: LcuClient, status_callback: StatusCallback) {
+    for attempt in 1..=ACCEPT_REQUEST_ATTEMPTS {
+        match client.accept_ready_check().await {
+            Ok(()) => {
+                info!("accepted ready check");
+                (status_callback)(BackendStatus::Accepted);
+                return;
+            }
+            Err(error) => {
+                error!(
+                    "failed to accept ready check on attempt {attempt}/{ACCEPT_REQUEST_ATTEMPTS}: {error}"
+                );
+                let status = accept_error_status(&client).await;
+                if status == BackendStatus::AcceptFailed && attempt < ACCEPT_REQUEST_ATTEMPTS {
+                    time::sleep(ACCEPT_RETRY_DELAY).await;
+                    continue;
+                }
+                (status_callback)(status);
+                return;
+            }
+        }
+    }
+}
+
+async fn accept_error_status(client: &LcuClient) -> BackendStatus {
+    match client.ready_check().await {
+        Ok(ready_check) => status_after_accept_error(ready_check.as_ref()),
+        Err(error) => {
+            debug!("failed to inspect ready check after accept error: {error}");
+            BackendStatus::AcceptFailed
+        }
+    }
+}
+
+fn status_after_accept_error(ready_check: Option<&ReadyCheck>) -> BackendStatus {
+    match ready_check {
+        Some(ready_check)
+            if ready_check.state == ReadyCheckState::InProgress
+                && ready_check.player_response == PlayerResponse::None =>
+        {
+            BackendStatus::AcceptFailed
+        }
+        Some(ready_check) if ready_check.player_response == PlayerResponse::Accepted => {
+            BackendStatus::Accepted
+        }
+        Some(_) | None => BackendStatus::Connected,
     }
 }
 
@@ -346,10 +396,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lcu::PlayerResponse;
+    use crate::lcu::{PlayerResponse, ReadyCheckState};
 
     fn ready_check(player_response: PlayerResponse, timer: u64) -> ReadyCheck {
         ReadyCheck {
+            state: ReadyCheckState::InProgress,
+            player_response,
+            timer,
+        }
+    }
+
+    fn ready_check_with_state(
+        state: ReadyCheckState,
+        player_response: PlayerResponse,
+        timer: u64,
+    ) -> ReadyCheck {
+        ReadyCheck {
+            state,
             player_response,
             timer,
         }
@@ -381,6 +444,17 @@ mod tests {
     }
 
     #[test]
+    fn cancels_when_ready_check_is_not_in_progress() {
+        let decision = accept_decision(
+            &ready_check_with_state(ReadyCheckState::Invalid, PlayerResponse::None, 0),
+            &AppConfig::default(),
+            false,
+        );
+
+        assert_eq!(decision, AcceptDecision::CancelPending);
+    }
+
+    #[test]
     fn legacy_enabled_field_does_not_disable_accept() {
         let config = AppConfig {
             enabled: false,
@@ -390,5 +464,26 @@ mod tests {
         let decision = accept_decision(&ready_check(PlayerResponse::None, 0), &config, false);
 
         assert_eq!(decision, AcceptDecision::Schedule(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn accept_error_only_stays_failed_when_ready_check_is_still_pending() {
+        assert_eq!(
+            status_after_accept_error(Some(&ready_check(PlayerResponse::None, 0))),
+            BackendStatus::AcceptFailed
+        );
+        assert_eq!(
+            status_after_accept_error(Some(&ready_check(PlayerResponse::Accepted, 0))),
+            BackendStatus::Accepted
+        );
+        assert_eq!(
+            status_after_accept_error(Some(&ready_check_with_state(
+                ReadyCheckState::Invalid,
+                PlayerResponse::None,
+                0
+            ))),
+            BackendStatus::Connected
+        );
+        assert_eq!(status_after_accept_error(None), BackendStatus::Connected);
     }
 }
