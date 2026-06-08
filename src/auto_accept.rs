@@ -11,10 +11,23 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendStatus {
-    Disconnected,
+    ClientNotFound,
+    LockfileError,
+    LcuClientError,
+    LcuNotReady,
+    EventConnecting,
+    ReadyCheckSyncing,
     Connected,
     Waiting,
     Accepted,
+    ClientChanged,
+    ClientClosed,
+    EventConnectError,
+    EventStreamClosed,
+    EventStreamError,
+    ReadyCheckReadError,
+    AcceptCheckFailed,
+    AcceptFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +62,11 @@ pub async fn run(
             Ok(lockfile) => lockfile,
             Err(error) => {
                 debug!("LCU lockfile not available: {error}");
-                (status_callback)(BackendStatus::Disconnected);
+                (status_callback)(if matches!(error, lcu::LcuError::LockfileNotFound) {
+                    BackendStatus::ClientNotFound
+                } else {
+                    BackendStatus::LockfileError
+                });
                 wait_for_retry_or_change(&mut config_rx, &mut shutdown_rx).await;
                 continue;
             }
@@ -72,7 +89,6 @@ pub async fn run(
             Ok(()) => {}
             Err(error) => {
                 debug!("LCU session ended: {error}");
-                (status_callback)(BackendStatus::Disconnected);
                 wait_for_retry_or_change(&mut config_rx, &mut shutdown_rx).await;
             }
         }
@@ -85,16 +101,49 @@ async fn run_session(
     shutdown_rx: &mut watch::Receiver<bool>,
     status_callback: StatusCallback,
 ) -> Result<(), AutoAcceptError> {
-    let client = LcuClient::new(credentials.clone())?;
+    let client = match LcuClient::new(credentials.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            (status_callback)(BackendStatus::LcuClientError);
+            return Err(error.into());
+        }
+    };
+    (status_callback)(BackendStatus::LcuNotReady);
     if !wait_until_lcu_ready(&client, &credentials, config_rx, shutdown_rx).await {
         return Ok(());
     }
 
-    let mut events = client.ready_check_events().await?;
+    (status_callback)(BackendStatus::EventConnecting);
+    let mut events = match client.ready_check_events().await {
+        Ok(events) => events,
+        Err(error) => {
+            (status_callback)(BackendStatus::EventConnectError);
+            return Err(error.into());
+        }
+    };
     let mut scheduler = AcceptScheduler::default();
     let mut lockfile_check = time::interval(Duration::from_secs(3));
 
     (status_callback)(BackendStatus::Connected);
+    (status_callback)(BackendStatus::ReadyCheckSyncing);
+    let current_ready_check = match client.ready_check().await {
+        Ok(ready_check) => ready_check,
+        Err(error) => {
+            (status_callback)(BackendStatus::ReadyCheckReadError);
+            return Err(error.into());
+        }
+    };
+    if let Some(ready_check) = current_ready_check {
+        let config = config_rx.borrow().clone();
+        scheduler.handle_ready_check(
+            ready_check,
+            &config,
+            client.clone(),
+            Arc::clone(&status_callback),
+        );
+    } else {
+        (status_callback)(BackendStatus::Connected);
+    }
 
     loop {
         tokio::select! {
@@ -109,16 +158,26 @@ async fn run_session(
                 if let Ok(current) = lcu::Lockfile::read(credentials.lockfile_path.clone()) {
                     if Credentials::from(current) != credentials {
                         scheduler.cancel();
+                        (status_callback)(BackendStatus::ClientChanged);
                         return Ok(());
                     }
                 } else {
                     scheduler.cancel();
+                    (status_callback)(BackendStatus::ClientClosed);
                     return Ok(());
                 }
             }
             next_event = events.next(&client) => {
-                let Some(event) = next_event? else {
+                let Some(event) = (match next_event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        scheduler.cancel();
+                        (status_callback)(BackendStatus::EventStreamError);
+                        return Err(error.into());
+                    }
+                }) else {
                     scheduler.cancel();
+                    (status_callback)(BackendStatus::EventStreamClosed);
                     return Ok(());
                 };
 
@@ -251,7 +310,7 @@ async fn schedule_accept(delay: Duration, client: LcuClient, status_callback: St
                 }
                 Err(error) => {
                     error!("failed to accept ready check: {error}");
-                    (status_callback)(BackendStatus::Connected);
+                    (status_callback)(BackendStatus::AcceptFailed);
                 }
             }
         }
@@ -260,7 +319,7 @@ async fn schedule_accept(delay: Duration, client: LcuClient, status_callback: St
         }
         Err(error) => {
             error!("failed to verify ready check before accepting: {error}");
-            (status_callback)(BackendStatus::Connected);
+            (status_callback)(BackendStatus::AcceptCheckFailed);
         }
     }
 }

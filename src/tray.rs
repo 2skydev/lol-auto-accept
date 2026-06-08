@@ -42,7 +42,14 @@ pub struct TrayApp {
 impl TrayApp {
     pub fn new(config: &AppConfig) -> Result<Self, TrayError> {
         let tray_menu = Menu::new();
-        let status_item = MenuItem::new("상태: 연결 안 됨", false, None);
+        let status_item = MenuItem::new(
+            format!(
+                "상태: {}",
+                backend_status_text(BackendStatus::ClientNotFound)
+            ),
+            false,
+            None,
+        );
         let delay_menu = Submenu::new("대기시간", true);
         let mut delay_items = Vec::new();
 
@@ -97,15 +104,30 @@ impl TrayApp {
     }
 
     pub fn update_status(&self, status: BackendStatus) {
-        self.status_item.set_text(format!(
-            "상태: {}",
-            match status {
-                BackendStatus::Disconnected => "연결 안 됨",
-                BackendStatus::Connected => "연결됨",
-                BackendStatus::Waiting => "대기 중",
-                BackendStatus::Accepted => "수락됨",
-            }
-        ));
+        self.status_item
+            .set_text(format!("상태: {}", backend_status_text(status)));
+    }
+}
+
+pub fn backend_status_text(status: BackendStatus) -> &'static str {
+    match status {
+        BackendStatus::ClientNotFound => "롤 클라이언트 대기 중",
+        BackendStatus::LockfileError => "락파일 오류",
+        BackendStatus::LcuClientError => "LCU HTTP 클라이언트 생성 실패",
+        BackendStatus::LcuNotReady => "LCU 준비 대기 중",
+        BackendStatus::EventConnecting => "LCU 이벤트 연결 중",
+        BackendStatus::ReadyCheckSyncing => "현재 수락 상태 확인 중",
+        BackendStatus::Connected => "연결됨 - 자동 수락 대기 중",
+        BackendStatus::Waiting => "수락 예약됨",
+        BackendStatus::Accepted => "수락됨",
+        BackendStatus::ClientChanged => "클라이언트 재시작 감지",
+        BackendStatus::ClientClosed => "클라이언트 종료 감지",
+        BackendStatus::EventConnectError => "LCU 이벤트 연결 실패",
+        BackendStatus::EventStreamClosed => "LCU 이벤트 연결 끊김",
+        BackendStatus::EventStreamError => "LCU 이벤트 수신 오류",
+        BackendStatus::ReadyCheckReadError => "수락 상태 조회 실패",
+        BackendStatus::AcceptCheckFailed => "수락 전 확인 실패",
+        BackendStatus::AcceptFailed => "수락 요청 실패",
     }
 }
 
@@ -152,4 +174,29 @@ fn resource_icon_path() -> PathBuf {
         .join("resources")
         .join("icons")
         .join("logo@256.ico")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_backend_status_to_specific_tray_text() {
+        assert_eq!(
+            backend_status_text(BackendStatus::ClientNotFound),
+            "롤 클라이언트 대기 중"
+        );
+        assert_eq!(
+            backend_status_text(BackendStatus::EventConnectError),
+            "LCU 이벤트 연결 실패"
+        );
+        assert_eq!(
+            backend_status_text(BackendStatus::Connected),
+            "연결됨 - 자동 수락 대기 중"
+        );
+        assert_eq!(
+            backend_status_text(BackendStatus::AcceptFailed),
+            "수락 요청 실패"
+        );
+    }
 }

@@ -1,6 +1,7 @@
 use std::{
     fmt, fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -27,6 +28,7 @@ pub const READY_CHECK_ACCEPT_PATH: &str = "/lol-matchmaking/v1/ready-check/accep
 pub const READY_CHECK_TOPIC: &str = "OnJsonApiEvent_lol-matchmaking_v1_ready-check";
 pub const CURRENT_SUMMONER_PATH: &str = "/lol-summoner/v1/current-summoner";
 const WAMP_PROTOCOL: &str = "wamp";
+const LCU_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Error)]
 pub enum LcuError {
@@ -48,6 +50,8 @@ pub enum LcuError {
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("tls setup failed: {0}")]
     Tls(#[from] native_tls::Error),
+    #[error("LCU request timed out")]
+    Timeout,
     #[error("unexpected LCU status: {0}")]
     UnexpectedStatus(StatusCode),
 }
@@ -177,6 +181,8 @@ impl LcuClient {
         let http = Client::builder()
             .danger_accept_invalid_certs(true)
             .danger_accept_invalid_hostnames(true)
+            .connect_timeout(LCU_REQUEST_TIMEOUT)
+            .timeout(LCU_REQUEST_TIMEOUT)
             .build()?;
 
         Ok(Self { credentials, http })
@@ -270,9 +276,12 @@ impl LcuClient {
             Connector::NativeTls(tls)
         };
 
-        let (mut socket, _) =
-            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
-                .await?;
+        let (mut socket, _) = tokio::time::timeout(
+            LCU_REQUEST_TIMEOUT,
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector)),
+        )
+        .await
+        .map_err(|_| LcuError::Timeout)??;
 
         socket
             .send(Message::Text(
@@ -529,5 +538,30 @@ mod tests {
         let message = r#"[8,"OnJsonApiEvent_lol-summoner_v1_current-summoner",{"data":{}}]"#;
 
         assert!(parse_ready_check_event(message).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn times_out_when_lcu_http_stalls() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((_stream, _)) = listener.accept() {
+                std::thread::sleep(LCU_REQUEST_TIMEOUT + Duration::from_secs(2));
+            }
+        });
+
+        let client = LcuClient::new(Credentials {
+            lockfile_path: PathBuf::new(),
+            port,
+            password: "secret".to_string(),
+            protocol: "http".to_string(),
+        })
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        let error = client.is_ready().await.unwrap_err();
+
+        assert!(matches!(error, LcuError::Request(error) if error.is_timeout()));
+        assert!(start.elapsed() < LCU_REQUEST_TIMEOUT + Duration::from_secs(2));
     }
 }

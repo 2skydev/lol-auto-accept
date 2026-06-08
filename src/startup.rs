@@ -1,6 +1,6 @@
 use std::env;
 
-use auto_launch::{AutoLaunch, WindowsEnableMode};
+use auto_launch::{AutoLaunch, AutoLaunchBuilder, WindowsEnableMode};
 use thiserror::Error;
 
 use crate::config::APP_NAME;
@@ -24,8 +24,12 @@ impl StartupManager {
         let exe = env::current_exe().map_err(StartupError::CurrentExe)?;
         let app_path = exe.to_str().ok_or(StartupError::InvalidExePath)?;
         let args: [&str; 0] = [];
-        let auto_launch =
-            AutoLaunch::new(APP_NAME, app_path, WindowsEnableMode::CurrentUser, &args);
+        let auto_launch = AutoLaunchBuilder::new()
+            .set_app_name(APP_NAME)
+            .set_app_path(app_path)
+            .set_windows_enable_mode(WindowsEnableMode::CurrentUser)
+            .set_args(&args)
+            .build()?;
 
         Ok(Self { auto_launch })
     }
