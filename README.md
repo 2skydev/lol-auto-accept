@@ -11,10 +11,10 @@ League of Legends 매칭 수락 창이 뜨면 자동으로 수락하는 Windows 
 
 [lol-auto-accept.exe](https://github.com/2skydev/lol-auto-accept/releases/latest/download/lol-auto-accept.exe) 링크를 통해 다운로드합니다.
 
-
 별도 설치 과정은 없습니다. 다운로드한 `lol-auto-accept.exe`를 원하는 폴더에 둔 뒤 실행하면 됩니다.
 
-> 다운로드가 되지 않으면 [최신 릴리스 페이지](https://github.com/2skydev/lol-auto-accept/releases/latest)로 이동한 뒤 Assets 영역에서 `lol-auto-accept.exe`를 다운로드합니다.
+> [!IMPORTANT]
+> 해당 앱은 서명을 하지 않아, 처음 실행 시 보안 경고가 표시될 수 있습니다. 무시하고 실행해주시면 됩니다!
 
 ### 사용 방법
 
