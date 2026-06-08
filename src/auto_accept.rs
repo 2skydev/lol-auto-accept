@@ -184,11 +184,22 @@ async fn run_session(
                     return Ok(());
                 };
 
+                debug_ready_check("event", &event);
                 let config = config_rx.borrow().clone();
                 scheduler.handle_ready_check(event, &config, client.clone(), Arc::clone(&status_callback));
             }
         }
     }
+}
+
+fn debug_ready_check(source: &str, ready_check: &ReadyCheck) {
+    debug!(
+        source,
+        state = ?ready_check.state,
+        player_response = %ready_check.player_response,
+        timer = ready_check.timer,
+        "ready check observed"
+    );
 }
 
 async fn wait_until_lcu_ready(

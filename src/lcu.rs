@@ -25,6 +25,7 @@ use tokio_tungstenite::{
 
 pub const READY_CHECK_PATH: &str = "/lol-matchmaking/v1/ready-check";
 pub const READY_CHECK_ACCEPT_PATH: &str = "/lol-matchmaking/v1/ready-check/accept";
+pub const JSON_API_EVENT_TOPIC: &str = "OnJsonApiEvent";
 pub const READY_CHECK_TOPIC: &str = "OnJsonApiEvent_lol-matchmaking_v1_ready-check";
 pub const CURRENT_SUMMONER_PATH: &str = "/lol-summoner/v1/current-summoner";
 const WAMP_PROTOCOL: &str = "wamp";
@@ -307,8 +308,8 @@ impl LcuClient {
 
         socket
             .send(Message::Text(
-                serde_json::to_string(&json!([5, READY_CHECK_TOPIC]))
-                    .expect("ready-check subscription is serializable")
+                serde_json::to_string(&json!([5, JSON_API_EVENT_TOPIC]))
+                    .expect("JSON API subscription is serializable")
                     .into(),
             ))
             .await?;
@@ -394,11 +395,24 @@ fn parse_ready_check_event_message(
         return Ok(ReadyCheckEventMessage::Ignored);
     }
 
-    if items.get(1).and_then(Value::as_str) != Some(READY_CHECK_TOPIC) {
+    let Some(topic) = items.get(1).and_then(Value::as_str) else {
+        return Ok(ReadyCheckEventMessage::Ignored);
+    };
+    if topic != JSON_API_EVENT_TOPIC && topic != READY_CHECK_TOPIC {
         return Ok(ReadyCheckEventMessage::Ignored);
     }
 
-    let Some(data) = items.get(2).and_then(|payload| payload.get("data")) else {
+    let Some(payload) = items.get(2) else {
+        return Ok(ReadyCheckEventMessage::Changed(None));
+    };
+
+    if topic == JSON_API_EVENT_TOPIC
+        && payload.get("uri").and_then(Value::as_str) != Some(READY_CHECK_PATH)
+    {
+        return Ok(ReadyCheckEventMessage::Ignored);
+    }
+
+    let Some(data) = payload.get("data") else {
         return Ok(ReadyCheckEventMessage::Changed(None));
     };
 
@@ -534,6 +548,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_ready_check_from_json_api_event_topic() {
+        let message = r#"[8,"OnJsonApiEvent",{"data":{"state":"InProgress","playerResponse":"None","timer":3},"eventType":"Update","uri":"/lol-matchmaking/v1/ready-check"}]"#;
+
+        let event = parse_ready_check_event(message).unwrap().unwrap();
+
+        assert_eq!(event.state, ReadyCheckState::InProgress);
+        assert_eq!(event.player_response, PlayerResponse::None);
+        assert_eq!(event.timer, 3);
+    }
+
+    #[test]
     fn parses_ready_check_timer_as_float_or_string() {
         let float_message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"state":"InProgress","playerResponse":"None","timer":3.9}}]"#;
         let string_message = r#"[8,"OnJsonApiEvent_lol-matchmaking_v1_ready-check",{"data":{"state":"InProgress","playerResponse":"None","timer":"4.2"}}]"#;
@@ -573,6 +598,13 @@ mod tests {
     #[test]
     fn ignores_non_ready_check_wamp_event() {
         let message = r#"[8,"OnJsonApiEvent_lol-summoner_v1_current-summoner",{"data":{}}]"#;
+
+        assert!(parse_ready_check_event(message).unwrap().is_none());
+    }
+
+    #[test]
+    fn ignores_non_ready_check_json_api_event() {
+        let message = r#"[8,"OnJsonApiEvent",{"data":{},"eventType":"Update","uri":"/lol-summoner/v1/current-summoner"}]"#;
 
         assert!(parse_ready_check_event(message).unwrap().is_none());
     }
