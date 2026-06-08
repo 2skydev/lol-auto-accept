@@ -149,7 +149,6 @@ fn app_icon() -> Result<Icon, BadIcon> {
 
 fn resource_icon_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
         .join("resources")
         .join("icons")
         .join("logo@256.ico")
