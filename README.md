@@ -2,6 +2,9 @@
 
 League of Legends 매칭 수락 창이 뜨면 자동으로 수락하는 Windows 트레이 앱입니다.
 
+<img width="413" height="438" alt="image" src="https://github.com/user-attachments/assets/b37dd93d-659a-427d-836d-b6ddc047080c" />
+
+
 ## 사용자 안내
 
 ### 다운로드
